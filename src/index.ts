@@ -1,3 +1,4 @@
+import { Server } from "node:http";
 import { loadConfig, networkConfigs } from "./config.ts";
 import { openDatabase } from "./lib/db.ts";
 import { HttpArchive, makeRpc } from "./lib/stellar.ts";
@@ -14,6 +15,13 @@ import { initTelemetry, withSpan } from "./lib/telemetry.ts";
 
 const config = loadConfig();
 const stopTelemetry = initTelemetry(config.OTEL_EXPORTER_OTLP_ENDPOINT);
+
+// Each component can be opted out of so the API, the indexer and the keeper
+// run as independent processes (one process, one responsibility). All three
+// run by default, which preserves the current single-process behaviour.
+const runApi = process.env.RUN_API !== "false";
+const runIndexer = process.env.RUN_INDEXER !== "false";
+const runKeeperEnv = process.env.RUN_KEEPER !== "false";
 const networks = networkConfigs(config);
 
 // One indexer and one database per network, so cursors and projections never
@@ -121,81 +129,86 @@ if (keeper && runKeeperPass) {
   adminHooks.keeperHistory = () => keeper.passHistory();
 }
 
-const app = createApp(
-  runtimes.map((rt) => ({
-    config: rt.network,
-    db: rt.db,
-    events: rt.indexer.events,
-    indexer: rt.indexer.status,
-    summaryCache: rt.indexer.merchantCache,
-    rpc: rt.server,
-    tokens: rt.tokens,
-    webhooks: rt.dispatcher,
-  })),
-  config,
-  adminHooks,
-);
-
-const http = app.listen(config.PORT, () => {
-  logger.info(
-    { port: config.PORT, networks: networks.map((n) => n.name) },
-    "api listening",
+let http: Server | undefined;
+if (runApi) {
+  const app = createApp(
+    runtimes.map((rt) => ({
+      config: rt.network,
+      db: rt.db,
+      events: rt.indexer.events,
+      indexer: rt.indexer.status,
+      summaryCache: rt.indexer.merchantCache,
+      rpc: rt.server,
+      tokens: rt.tokens,
+      webhooks: rt.dispatcher,
+    })),
+    config,
+    adminHooks,
   );
-});
+
+  http = app.listen(config.PORT, () => {
+    logger.info(
+      { port: config.PORT, networks: networks.map((n) => n.name) },
+      "api listening",
+    );
+  });
+}
 
 const loops: Loop[] = [];
 
-for (const rt of runtimes) {
-  loops.push(
-    every(config.INDEXER_INTERVAL_MS, async () => {
-      try {
-        await rt.runPass();
-      } catch {
-        // Handled in runPass
-      }
-    }),
-  );
-  loops.push(
-    every(config.RECONCILE_INTERVAL_MS, async () => {
-      try {
-        const r = await rt.reconciler.tick();
-        rt.indexer.status.reconciliations = (rt.indexer.status.reconciliations ?? 0) + 1;
-        rt.indexer.status.corrections = (rt.indexer.status.corrections ?? 0) + r.corrections;
-        if (r.errors > 0) {
-          logger.warn(
-            {
-              network: rt.network.name,
-              sampled: r.sampled,
-              onChain: r.onChain,
-              errors: r.errors,
-              lastError: r.lastError,
-            },
-            "reconcile pass had failures",
-          );
+if (runIndexer) {
+  for (const rt of runtimes) {
+    loops.push(
+      every(config.INDEXER_INTERVAL_MS, async () => {
+        try {
+          await rt.runPass();
+        } catch {
+          // Handled in runPass
         }
-        if (r.corrections > 0) {
-          logger.info(
-            { network: rt.network.name, corrections: r.corrections, sampled: r.sampled },
-            "reconcile pass corrected drift",
-          );
+      }),
+    );
+    loops.push(
+      every(config.RECONCILE_INTERVAL_MS, async () => {
+        try {
+          const r = await rt.reconciler.tick();
+          rt.indexer.status.reconciliations = (rt.indexer.status.reconciliations ?? 0) + 1;
+          rt.indexer.status.corrections = (rt.indexer.status.corrections ?? 0) + r.corrections;
+          if (r.errors > 0) {
+            logger.warn(
+              {
+                network: rt.network.name,
+                sampled: r.sampled,
+                onChain: r.onChain,
+                errors: r.errors,
+                lastError: r.lastError,
+              },
+              "reconcile pass had failures",
+            );
+          }
+          if (r.corrections > 0) {
+            logger.info(
+              { network: rt.network.name, corrections: r.corrections, sampled: r.sampled },
+              "reconcile pass corrected drift",
+            );
+          }
+        } catch {
+          // Reconciler.tick logs and swallows its own failures; this is defensive.
         }
-      } catch {
-        // Reconciler.tick logs and swallows its own failures; this is defensive.
-      }
-    }),
-    // Retry undelivered webhooks on their own cadence so a slow or silent
-    // indexer loop still makes delivery progress.
-    every(5_000, async () => {
-      try {
-        await rt.dispatcher.retryDue(Math.floor(Date.now() / 1000));
-      } catch {
-        // retryDue logs its own failures; the loop keeps going.
-      }
-    }),
-  );
+      }),
+      // Retry undelivered webhooks on their own cadence so a slow or silent
+      // indexer loop still makes delivery progress.
+      every(5_000, async () => {
+        try {
+          await rt.dispatcher.retryDue(Math.floor(Date.now() / 1000));
+        } catch {
+          // retryDue logs its own failures; the loop keeps going.
+        }
+      }),
+    );
+  }
 }
 
-if (runKeeperPass) {
+if (runKeeperEnv && runKeeperPass) {
   loops.push(
     every(config.KEEPER_INTERVAL_MS, async () => {
       try {
@@ -244,10 +257,15 @@ async function shutdown(signal: string): Promise<void> {
   const outcome = await drain(loops, config.SHUTDOWN_TIMEOUT_MS);
   if (outcome === "timeout") logger.warn({ timeoutMs: config.SHUTDOWN_TIMEOUT_MS }, "passes still running; closing anyway");
   await stopTelemetry().catch(() => {});
-  http.close(() => {
+  if (http) {
+    http.close(() => {
+      for (const rt of runtimes) rt.db.close();
+      process.exit(0);
+    });
+  } else {
     for (const rt of runtimes) rt.db.close();
     process.exit(0);
-  });
+  }
 }
 
 process.on("SIGTERM", () => void shutdown("SIGTERM"));
