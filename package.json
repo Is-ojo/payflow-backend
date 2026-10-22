@@ -22,7 +22,7 @@
     "indexer": "node --experimental-strip-types src/cmd/indexer.ts",
     "keeper": "node --experimental-strip-types src/cmd/keeper.ts",
     "load-test": "node --experimental-strip-types test/load-test.ts",
-    "mutation-test": "node --experimental-strip-types test/mutation.test.ts",
+    "mutation-test": "node --experimental-strip-types --test test/mutation.ts",
     "cli": "node --experimental-strip-types src/cmd/cli.ts",
     "test": "node --experimental-strip-types --test test/*.test.ts",
     "test:coverage": "node --experimental-strip-types --experimental-test-coverage --test-coverage-include=src/** --test-coverage-lines=94 --test-reporter=tap --test-reporter=lcov --test-reporter-destination=stdout --test-reporter-destination=lcov.info --test test/*.test.ts",
@@ -30,7 +30,8 @@
     "typecheck:src": "tsc --noEmit -p tsconfig.json",
     "typecheck:test": "tsc --noEmit -p tsconfig.test.json",
     "lint": "eslint src test",
-    "rebuild:projections": "node --experimental-strip-types src/cmd/rebuild-projections.ts"
+    "rebuild:projections": "node --experimental-strip-types src/cmd/rebuild-projections.ts",
+    "reindex": "node --experimental-strip-types src/cmd/reindex.ts"
   },
   "dependencies": {
     "@stellar/stellar-sdk": "^17.2.1",

@@ -36,6 +36,7 @@ export interface ListCursorFilter {
 
 export interface ListPlansFilter extends ListCursorFilter {
   merchant?: string | undefined;
+  q?: string | undefined;
 }
 
 export interface ListMandatesFilter extends ListCursorFilter {
@@ -73,11 +74,29 @@ export function listPlans(
   db: DatabaseSync,
   filter: ListPlansFilter,
 ): { rows: PlanRow[]; nextCursorId: number | null } {
+  const conditions: string[] = [];
+  const args: unknown[] = [];
+
+  if (filter.merchant) {
+    conditions.push("merchant = ?");
+    args.push(filter.merchant);
+  }
+  if (filter.q) {
+    const escaped = filter.q
+      .replace(/\\/g, "\\\\")
+      .replace(/%/g, "\\%")
+      .replace(/_/g, "\\_");
+    conditions.push("LOWER(name) LIKE LOWER(?) ESCAPE '\\'");
+    args.push(`%${escaped}%`);
+  }
+
+  const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+
   return cursorPage(
     db,
     "FROM plans",
-    filter.merchant ? "WHERE merchant = ?" : "",
-    filter.merchant ? [filter.merchant] : [],
+    where,
+    args,
     filter,
   );
 }
@@ -270,6 +289,52 @@ export function listMandateCharges(
 }
 
 /** Latest indexed vault balance for each token owned by an address. */
+/** One settled charge, as the merchant CSV export reads it. */
+export interface MerchantChargeRow {
+  tx_hash: string;
+  mandate_id: number;
+  subscriber: string;
+  amount: string;
+  fee: string;
+  created_at: number;
+}
+
+/** Where a page of `listMerchantChargesAfter` resumes: the last row's sort key. */
+export interface ChargeKey {
+  created_at: number;
+  tx_hash: string;
+  mandate_id: number;
+}
+
+/**
+ * One page of a merchant's charges, oldest first, after `after` in
+ * (created_at, tx_hash, mandate_id) order. Keyset pages over the
+ * `charges_merchant_created_at` index keep every query short, so a long
+ * export never holds the synchronous SQLite for its whole length.
+ * `from`/`to` bound `created_at` in unix milliseconds, half-open.
+ */
+export function listMerchantChargesAfter(
+  db: DatabaseSync,
+  merchant: string,
+  after: ChargeKey | null,
+  limit: number,
+  from = 0,
+  to = Number.MAX_SAFE_INTEGER,
+): MerchantChargeRow[] {
+  const key = after ?? { created_at: -1, tx_hash: "", mandate_id: -1 };
+  return db
+    .prepare(
+      `SELECT tx_hash, mandate_id, subscriber, amount, fee, created_at
+         FROM charges
+        WHERE merchant = ?
+          AND created_at >= ? AND created_at < ?
+          AND (created_at, tx_hash, mandate_id) > (?, ?, ?)
+        ORDER BY created_at, tx_hash, mandate_id
+        LIMIT ?`,
+    )
+    .all(merchant, from, to, key.created_at, key.tx_hash, key.mandate_id, limit) as unknown as MerchantChargeRow[];
+}
+
 export function getVaultBalances(
   db: DatabaseSync,
   address: string,

@@ -12,6 +12,7 @@ import {
   present,
   validate,
 } from "./validate.ts";
+import { z } from "zod";
 import type { PlanPage, PlanStatsResponse } from "./types.ts";
 
 /**
@@ -34,6 +35,14 @@ export function plansRouter(db: DatabaseSync, tokens: TokenMetadataService): Rou
       present(req.query.merchant),
     );
     if (!merchant.ok) return;
+    const q = validate(
+      req,
+      res,
+      "q",
+      z.string().optional(),
+      present(req.query.q),
+    );
+    if (!q.ok) return;
     const cursor = validate(
       req,
       res,
@@ -47,6 +56,7 @@ export function plansRouter(db: DatabaseSync, tokens: TokenMetadataService): Rou
 
     const page = listPlans(db, {
       merchant: merchant.value,
+      q: q.value,
       cursor: cursor.value,
       limit: limitOf(limit.value),
     });

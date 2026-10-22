@@ -20,12 +20,10 @@ const DURATION_MS = Number(process.env.LOAD_DURATION_MS ?? "15000");
 const ENDPOINTS: string[] = [
   "/health",
   "/ready",
-  "/api/merchants",
   "/api/plans",
   "/api/mandates?limit=5",
-  "/api/charges?limit=5",
-  "/api/subscribers",
-  "/api/vault",
+  "/api/due",
+  "/api/stats",
   "/api/protocol",
 ];
 
@@ -53,7 +51,7 @@ async function hit(
   signal: AbortSignal,
 ): Promise<Sample> {
   const start = Date.now();
-  let status = 0;
+  let status: number;
   try {
     const res = await fetch(`${BASE}${endpoint}`, { signal });
     status = res.status;

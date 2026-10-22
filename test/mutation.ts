@@ -7,13 +7,13 @@
  * (bad — a regression could slip through).
  *
  * Usage:
- *   node --experimental-strip-types test/mutation.test.ts
+ *   npm run mutation-test
  */
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, writeFileSync, copyFileSync, rmSync, existsSync, readFileSync } from "node:fs";
+import { mkdtempSync, writeFileSync, rmSync, existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -64,8 +64,8 @@ interface MutationResult extends Mutation {
 
 /** Run the test suite once, returning whether every test passed. */
 function runTests(): { passed: boolean; output: string } {
-  let output = "";
-  let passed = false;
+  let output: string;
+  let passed: boolean;
   try {
     output = execFileSync(
       "node",
@@ -86,7 +86,6 @@ function runTests(): { passed: boolean; output: string } {
 describe("mutation testing", () => {
   test("every mutation to indexer projections is killed by the test suite", () => {
     const results: MutationResult[] = [];
-    const repoRoot = process.cwd();
 
     const baseline = runTests();
     assert.ok(baseline.passed, `baseline test suite is red:\n${baseline.output}`);

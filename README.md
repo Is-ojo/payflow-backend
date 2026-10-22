@@ -276,6 +276,24 @@ matches the chain. A failed RPC read is logged and retried on the next pass;
 it never crashes the loop. Corrections are logged and reported on `/health`
 under `indexer.reconciliations` and `indexer.corrections`.
 
+### Rebuilding the projection from scratch
+
+When the database is corrupted, stop the server and run:
+
+```bash
+npm run reindex
+```
+
+For every configured network it moves the SQLite file (with its `-wal` and
+`-shm` files) aside to `<DATABASE_PATH>.bak-<UTC timestamp>`, creates a fresh
+database and catches up from `INDEXER_START_LEDGER`. The old file is never
+deleted; remove the backup yourself once the new projection checks out.
+
+The running server holds `<DATABASE_PATH>.lock` (its PID), and `reindex`
+refuses to run while that process is alive, so it cannot move a database out
+from under a live server. A lock left by a crashed process is detected by its
+dead PID and taken over.
+
 ### Rotating the keeper key without downtime
 
 `charge` is permissionless, so the keeper key is only a fee payer â€” but losing
@@ -354,6 +372,10 @@ When extra networks are configured (see below), every route also answers under
 | `GET` | `/api/mandates/:id/charges` | Settlement history |
 | `GET` | `/api/stream?merchant=&subscriber=` | Server-sent `charged`, `subscribed`, `cancelled` and `mandate_ended` events (25-second heartbeat) |
 | `POST` | `/api/webhooks` | Register a URL to receive signed `charged` events; proves control of the merchant address with a signature |
+| `POST` | `/api/webhooks/:id/rotate` | Replace a webhook's signing secret; both secrets sign during the overlap |
+| `POST` | `/api/webhooks/:id/test` | Send a signed `ping` through the normal delivery path; returns status code and latency |
+| `GET` | `/api/webhooks/:id/deliveries` | The webhook's last 100 delivery attempts: event, status code, error, attempt, next retry |
+| `GET` / `POST` | `/api/auth` | SEP-10 challenge, and a JWT for a signed challenge (only when `SEP10_SIGNING_KEY` is set) |
 | `GET` | `/api/vault/:address` | Latest balance per token |
 | `GET` | `/api/vault/:address/events?limit=` | Vault deposit, withdrawal and debit history, newest first |
 | `GET` | `/api/protocol` | Current protocol fee (`fee_bps`) and fee-change history |
@@ -600,6 +622,54 @@ failed and stops receiving deliveries until re-registered. Undelivered
 deliveries are retried on a short cadence, so a silent indexer still makes
 delivery progress.
 
+`GET /api/webhooks?merchant=<G...>&timestamp=<unix s>&signature=<base64>`
+lists the merchant's webhooks, newest first, signed over
+`payflow-webhook-list:v1:<merchant>:<timestamp>`. Secrets are never returned
+again: each entry shows only `secretLast4`. `DELETE /api/webhooks/:id` removes
+one, with `{ merchant, timestamp, signature }` as a JSON body (or the same
+three query parameters) signed over
+`payflow-webhook-delete:v1:<merchant>:<id>:<timestamp>`; a deleted webhook gets
+no further deliveries and its scheduled retries are dropped. Each action has
+its own message prefix, so a signature for one cannot be replayed as another.
+A wrong, malformed or expired (older than ten minutes) signature is a `401
+unauthorized`.
+
+`POST /api/webhooks/:id/rotate` (signed over
+`payflow-webhook-rotate:v1:<merchant>:<id>:<timestamp>`) replaces a webhook's
+secret and returns the new one once. For `WEBHOOK_SECRET_OVERLAP_S` (one day
+by default; `0` retires the old secret at once, for a leak) every delivery
+carries both signatures, `Payflow-Signature: sha256=<new>, sha256=<old>`;
+receivers should accept a request when any listed signature matches a secret
+they hold. After the overlap only the new secret signs.
+
+`POST /api/webhooks/:id/test` (signed over
+`payflow-webhook-test:v1:<merchant>:<id>:<timestamp>`) delivers
+`{ "event": "ping", "webhook_id", "merchant" }` through the normal path — same
+headers, same signatures, same retries — and answers with the attempt's
+`status`, `statusCode`, `latencyMs`, `error` and `nextRetryAt`.
+
+`GET /api/webhooks/:id/deliveries` (signed over
+`payflow-webhook-deliveries:v1:<merchant>:<id>:<timestamp>`, as query
+parameters) lists the webhook's last 100 delivery attempts, newest first: a
+delivery that failed and was retried shows each attempt, with its status code,
+error and the retry it scheduled. Older attempts are pruned as new ones are
+written.
+
+#### SEP-10 sign-in
+
+Instead of signing a message for every call, a merchant can sign in once with
+[SEP-10](https://github.com/stellar/stellar-protocol/blob/master/ecosystem/sep-0010.md):
+`GET /api/auth?account=<G...>` returns a challenge transaction, the wallet
+signs it, and `POST /api/auth` with `{ "transaction": "<signed XDR>" }` (JSON
+or form-encoded) returns `{ "token": "<JWT>" }`. Every webhook route accepts
+that token as `Authorization: Bearer <token>` in place of `merchant`,
+`timestamp` and `signature`. Tokens last `SEP10_JWT_TTL_S` (an hour by
+default), are valid only on the network that issued them, and each challenge
+yields one token. An account that exists must sign with signers meeting its
+medium threshold; one that does not must sign with its master key. Publish
+the server's public key as `SIGNING_KEY` and the endpoint as
+`WEB_AUTH_ENDPOINT` in the home domain's `stellar.toml`.
+
 | `error.code` | HTTP | Where |
 |---|---|---|
 | `not_found` | 404 | An unknown path, or a method/path the API does not expose |
@@ -612,7 +682,7 @@ delivery progress.
 | `token_metadata_unavailable` | 502 | `GET /api/tokens/:id` while the token contract cannot be read |
 | `rate_limited` | 429 | API request exceeded the configured per-IP limit; includes `Retry-After` |
 | `stream_limit` | 503 | `GET /api/stream` when the concurrent stream cap is reached |
-| `unauthorized` | 401 | A `/admin/*` request without a valid bearer token |
+| `unauthorized` | 401 | A `/admin/*` request without a valid bearer token, or a webhook management request with a wrong or expired signature or an invalid or expired SEP-10 token |
 | `reindex_unavailable` | 503 | `POST /admin/reindex` on a process without an indexer |
 | `indexer_unavailable` | 503 | `/admin/indexer/pause`/`resume` on a process without an indexer |
 | `keeper_unavailable` | 503 | A keeper endpoint while `KEEPER_ENABLED=false` |
@@ -761,12 +831,14 @@ examined without API downtime.
 | `TOKEN_ID` | — | Default token for the flat merchant-summary amounts. Unset, they span every token |
 | `NETWORKS` | *(empty)* | Extra networks to serve, comma-separated (see below) |
 | `KEEPER_ENABLED` | `false` | Turn on automatic settlement |
+| `RUN_API`, `RUN_INDEXER`, `RUN_KEEPER` | `true` | Set one to `false` to leave that part out of this process, so the API, the indexer and the keeper can run as separate processes on the same database. Only the process running the indexer takes the database lock. Several API processes need Postgres; with SQLite run one |
 | `KEEPER_DRY_RUN` | `false` | Rehearse each pass: simulate every due charge and log the outcome without signing or submitting anything |
 | `KEEPER_SECRET` | — | `S...` key that pays settlement fees. Required when the keeper is on |
 | `KEEPER_SECRET_NEXT` | — | Standby `S...` key for zero-downtime rotation; see [Rotating the keeper key](#rotating-the-keeper-key-without-downtime) |
 | `KEEPER_CHANNEL_SECRETS` | *(empty)* | Extra `S...` channel keys, comma-separated: each settles in parallel with its own sequence and fees; see [Settling in parallel with channel accounts](#settling-in-parallel-with-channel-accounts) |
 | `KEEPER_INTERVAL_MS` | `60000` | Settlement poll interval |
 | `KEEPER_ORDER` | `oldest` | Order for due mandates: `oldest` (due date ascending) or `largest` (amount descending) |
+| `KEEPER_MERCHANTS` | *(empty)* | Only settle mandates payable to these merchants, comma-separated `G...` addresses. Empty settles every merchant |
 | `KEEPER_FEE_PERCENTILE` | `90` | Soroban inclusion-fee percentile used for charge transactions (`50`, `60`, `70`, `80`, `90`, `95`, or `99`) |
 | `KEEPER_MAX_FEE` | `100000` | Maximum inclusion fee in stroops; congestion retries cannot exceed this cap |
 | `KEEPER_BATCH` | `true` | Use `charge_many` when supported, falling back to single charges when unavailable |
@@ -789,6 +861,12 @@ examined without API downtime.
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | — | OTLP/HTTP collector base URL. Unset disables tracing at no cost |
 | `SHUTDOWN_TIMEOUT_MS` | `15000` | How long shutdown waits for in-flight passes |
 | `ADMIN_TOKEN` | — | Bearer token for `/admin`. Unset keeps those routes disabled |
+| `WEBHOOK_SECRET_OVERLAP_S` | `86400` | Seconds a rotated webhook secret keeps signing beside the new one (0–604800) |
+| `SEP10_SIGNING_KEY` | — | Secret seed of the SEP-10 server account. Unset keeps `/api/auth` disabled |
+| `SEP10_JWT_SECRET` | — | HMAC key for SEP-10 JWTs, at least 32 characters; required with `SEP10_SIGNING_KEY` |
+| `SEP10_HOME_DOMAIN` | — | Home domain of the challenge (`<home domain> auth`); required with `SEP10_SIGNING_KEY` |
+| `SEP10_WEB_AUTH_DOMAIN` | `SEP10_HOME_DOMAIN` | Domain serving `/api/auth`, the challenge's `web_auth_domain` |
+| `SEP10_JWT_TTL_S` | `3600` | JWT lifetime in seconds (60–86400) |
 
 Setting `OTEL_EXPORTER_OTLP_ENDPOINT` exports OpenTelemetry spans for every
 RPC call (`rpc.<method>`), indexer and keeper pass, and HTTP request. Every

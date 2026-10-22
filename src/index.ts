@@ -1,9 +1,11 @@
 import { Server } from "node:http";
 import { loadConfig, networkConfigs } from "./config.ts";
 import { openDatabase } from "./lib/db.ts";
+import { acquireLock } from "./lib/lock.ts";
 import { HttpArchive, makeRpc } from "./lib/stellar.ts";
 import { makeSimulationReader, TokenMetadataService } from "./lib/tokens.ts";
 import { WebhookDispatcher } from "./lib/webhooks.ts";
+import { sep10For } from "./routes/auth.ts";
 import { createApp } from "./app.ts";
 import { Indexer } from "./indexer.ts";
 import { Keeper } from "./keeper.ts";
@@ -27,6 +29,11 @@ const networks = networkConfigs(config);
 // One indexer and one database per network, so cursors and projections never
 // mix. `runtimes[0]` is the default network: it serves the unprefixed routes.
 const runtimes = networks.map((network) => {
+  // Mark the database as in use so `npm run reindex` refuses to move it away
+  // underneath us; a second indexer on the same file fails here too. Only the
+  // process that runs the indexer takes the lock: an API-only or keeper-only
+  // process shares the file with it (SQLite WAL serialises their writes).
+  const releaseLock = runIndexer ? acquireLock(network.databasePath) : () => {};
   const db = openDatabase(network.databasePath);
   const server = makeRpc(network);
   // A full-history archive backfills the gap between the stored cursor and
@@ -34,7 +41,11 @@ const runtimes = networks.map((network) => {
   // retention does not silently shrink the projection.
   const archive = network.archiveUrl ? new HttpArchive(network.archiveUrl) : undefined;
   const indexer = new Indexer(db, server, network, undefined, archive);
-  const dispatcher = new WebhookDispatcher({ db, events: indexer.events });
+  const dispatcher = new WebhookDispatcher({
+    db,
+    events: indexer.events,
+    secretOverlapSeconds: config.WEBHOOK_SECRET_OVERLAP_S,
+  });
   dispatcher.bind(indexer.events);
   const runPass = serial(async () => {
     try {
@@ -69,9 +80,16 @@ const runtimes = networks.map((network) => {
     // serves the corrected projection instead of a stale cache entry.
     (merchant) => indexer.merchantCache.invalidate(merchant),
   );
-  return { network, db, server, indexer, runPass, tokens, reconciler, dispatcher };
+  // SEP-10 sign-in reads the signing account's signers through the same RPC.
+  const auth = sep10For(config, network, server);
+  return { network, db, releaseLock, server, indexer, runPass, tokens, reconciler, dispatcher, auth };
 });
 const defaultRuntime = runtimes[0]!;
+// Release the database locks however the process ends; a crash that skips
+// this leaves a stale lock, which the next taker detects by its dead PID.
+process.on("exit", () => {
+  for (const rt of runtimes) rt.releaseLock();
+});
 
 const keeper = config.KEEPER_ENABLED
   ? new Keeper(defaultRuntime.db, defaultRuntime.server, config)
@@ -141,6 +159,7 @@ if (runApi) {
       rpc: rt.server,
       tokens: rt.tokens,
       webhooks: rt.dispatcher,
+      auth: rt.auth,
     })),
     config,
     adminHooks,
@@ -257,13 +276,19 @@ async function shutdown(signal: string): Promise<void> {
   const outcome = await drain(loops, config.SHUTDOWN_TIMEOUT_MS);
   if (outcome === "timeout") logger.warn({ timeoutMs: config.SHUTDOWN_TIMEOUT_MS }, "passes still running; closing anyway");
   await stopTelemetry().catch(() => {});
+  const closeAll = () => {
+    for (const rt of runtimes) {
+      rt.db.close();
+      rt.releaseLock();
+    }
+  };
   if (http) {
     http.close(() => {
-      for (const rt of runtimes) rt.db.close();
+      closeAll();
       process.exit(0);
     });
   } else {
-    for (const rt of runtimes) rt.db.close();
+    closeAll();
     process.exit(0);
   }
 }

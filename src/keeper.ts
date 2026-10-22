@@ -328,7 +328,8 @@ export class Keeper {
    * Mandates the indexer believes are chargeable right now, in the order set
    * by `KEEPER_ORDER` (`oldest` = oldest-due first, the default; `largest` =
    * largest amount first), skipping any that are backing off after a failed
-   * charge.
+   * charge. With `KEEPER_MERCHANTS` set, only those merchants' mandates are
+   * returned; empty means every merchant.
    */
   findDue(now: number = Math.floor(Date.now() / 1000), limit = BATCH): DueMandate[] {
     const due: DueMandate[] = [];
@@ -342,8 +343,18 @@ export class Keeper {
     return due;
   }
 
+  /**
+   * `KEEPER_MERCHANTS` as a JSON array, bound into the due queries'
+   * `json_each` filter; `[]` means every merchant. Binding the list keeps
+   * the SQL text fixed whatever the config holds.
+   */
+  private merchantsJson(): string {
+    return JSON.stringify(this.config.KEEPER_MERCHANTS ?? []);
+  }
+
   private queryDue(now: number, limit: number): DueMandate[] {
     if (this.config.KEEPER_ORDER === "largest") return this.queryDueLargest(now, limit);
+    const merchants = this.merchantsJson();
     return this.db
       .prepare(
         `SELECT id, subscriber, merchant, next_charge, amount, plan_id
@@ -351,10 +362,11 @@ export class Keeper {
           WHERE status = 'Active'
             AND next_charge <= ?
             AND (max_charges = 0 OR charges_made < max_charges)
+            AND (? = '[]' OR merchant IN (SELECT value FROM json_each(?)))
           ORDER BY next_charge ASC
           LIMIT ?`,
       )
-      .all(now, limit) as unknown as DueMandate[];
+      .all(now, merchants, merchants, limit) as unknown as DueMandate[];
   }
 
   /**
@@ -367,15 +379,17 @@ export class Keeper {
    * "largest first" must see every due mandate before it can pick a batch.
    */
   private queryDueLargest(now: number, limit: number): DueMandate[] {
+    const merchants = this.merchantsJson();
     const rows = this.db
       .prepare(
         `SELECT id, subscriber, merchant, next_charge, amount, plan_id
            FROM mandates
           WHERE status = 'Active'
             AND next_charge <= ?
-            AND (max_charges = 0 OR charges_made < max_charges)`,
+            AND (max_charges = 0 OR charges_made < max_charges)
+            AND (? = '[]' OR merchant IN (SELECT value FROM json_each(?)))`,
       )
-      .all(now) as unknown as DueMandate[];
+      .all(now, merchants, merchants) as unknown as DueMandate[];
     rows.sort((a, b) => {
       const amountDiff = BigInt(b.amount) - BigInt(a.amount);
       if (amountDiff > 0n) return 1;

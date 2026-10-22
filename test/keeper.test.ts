@@ -88,11 +88,12 @@ function insertMandate(
   id: number,
   nextCharge: number,
   amount: string,
+  merchant: string = MERCHANT,
 ): void {
   db.prepare(
     `INSERT INTO mandates (id, subscriber, merchant, plan_id, amount, period, next_charge, status, ledger)
      VALUES (?, ?, ?, 1, ?, 60, ?, 'Active', 1)`,
-  ).run(id, SUBSCRIBER, MERCHANT, amount, nextCharge);
+  ).run(id, SUBSCRIBER, merchant, amount, nextCharge);
 }
 
 /** Collect logger.info messages while running `fn`. */
@@ -495,6 +496,73 @@ describe("keeper channel accounts", () => {
     );
     assert.equal(keeper.channelCount, 2, "duplicates collapse into the existing channels");
     assert.deepEqual(keeper.keyPublicKeys, [keyA.publicKey(), keyB.publicKey()]);
+  });
+});
+
+describe("keeper merchant filter (KEEPER_MERCHANTS)", () => {
+  const OTHER_MERCHANT = Keypair.random().publicKey();
+  const THIRD_MERCHANT = Keypair.random().publicKey();
+
+  function merchantKeeper(
+    db: ReturnType<typeof openDatabase>,
+    merchants: string[] | undefined,
+    order?: "oldest" | "largest",
+  ): Keeper {
+    const config = keeperConfig({ KEEPER_SECRET: keyA.secret() }, order);
+    return new Keeper(
+      db,
+      fakeRpc(new Set()),
+      merchants === undefined ? config : ({ ...config, KEEPER_MERCHANTS: merchants } as Config),
+    );
+  }
+
+  function seed(db: ReturnType<typeof openDatabase>): void {
+    insertMandate(db, 1, 1_000, "100", MERCHANT);
+    insertMandate(db, 2, 1_001, "900", OTHER_MERCHANT);
+    insertMandate(db, 3, 1_002, "500", THIRD_MERCHANT);
+  }
+
+  test("an empty list settles every merchant's mandates", () => {
+    const db = openDatabase(":memory:");
+    seed(db);
+    assert.deepEqual(merchantKeeper(db, []).findDue(2_000).map((m) => m.id), [1, 2, 3]);
+    assert.deepEqual(merchantKeeper(db, undefined).findDue(2_000).map((m) => m.id), [1, 2, 3]);
+    db.close();
+  });
+
+  test("only the listed merchants' mandates are due", () => {
+    const db = openDatabase(":memory:");
+    seed(db);
+    assert.deepEqual(merchantKeeper(db, [MERCHANT]).findDue(2_000).map((m) => m.id), [1]);
+    assert.deepEqual(
+      merchantKeeper(db, [MERCHANT, THIRD_MERCHANT]).findDue(2_000).map((m) => m.id),
+      [1, 3],
+    );
+    db.close();
+  });
+
+  test("the filter applies to KEEPER_ORDER=largest too", () => {
+    const db = openDatabase(":memory:");
+    seed(db);
+    assert.deepEqual(
+      merchantKeeper(db, [MERCHANT, THIRD_MERCHANT], "largest").findDue(2_000).map((m) => m.id),
+      [3, 1],
+    );
+    db.close();
+  });
+
+  test("a pass never charges another merchant's mandate", async () => {
+    const db = openDatabase(":memory:");
+    seed(db);
+    const submitted: string[] = [];
+    const keeper = new Keeper(db, fakeRpc(new Set([keyA.publicKey()]), submitted), {
+      ...keeperConfig({ KEEPER_SECRET: keyA.secret() }),
+      KEEPER_MERCHANTS: [OTHER_MERCHANT],
+    } as Config);
+    const results = await keeper.tick(2_000);
+    assert.deepEqual(results.map((r) => r.mandateId), [2]);
+    assert.equal(submitted.length, 1);
+    db.close();
   });
 });
 
