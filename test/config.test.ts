@@ -332,3 +332,19 @@ describe("Stellar identifier validation", () => {
     );
   });
 });
+
+// zod 4 replaced `z.string().url()` with the top-level `z.url()` format
+// validator, which validates through the WHATWG URL parser. This pins what the
+// migration accepts and rejects at startup.
+describe("zod 4 url validation", () => {
+  test("z.url() accepts the otel endpoint and names it when rejected", () => {
+    assert.equal(
+      loadConfig({ ...BASE, OTEL_EXPORTER_OTLP_ENDPOINT: "http://localhost:4318" }).OTEL_EXPORTER_OTLP_ENDPOINT,
+      "http://localhost:4318",
+    );
+    assert.throws(
+      () => loadConfig({ ...BASE, OTEL_EXPORTER_OTLP_ENDPOINT: "definitely not a url" }),
+      /OTEL_EXPORTER_OTLP_ENDPOINT/,
+    );
+  });
+});

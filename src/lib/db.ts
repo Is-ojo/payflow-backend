@@ -152,6 +152,17 @@ CREATE TABLE IF NOT EXISTS mandate_timeline (
 );
 CREATE INDEX IF NOT EXISTS mandate_timeline_order ON mandate_timeline(mandate_id, ledger, tx_hash, kind);
 
+-- A merchant's self-declared profile, from the plan registry's
+-- profile_updated event: a display name and a URL the contract stores without
+-- verifying. One row per merchant, upserted with a ledger guard so a replayed
+-- older event can never overwrite a newer profile.
+CREATE TABLE IF NOT EXISTS merchant_profiles (
+  merchant TEXT    PRIMARY KEY,
+  name     TEXT    NOT NULL,
+  url      TEXT    NOT NULL,
+  ledger   INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS webhooks (
   id          INTEGER PRIMARY KEY,
   merchant    TEXT    NOT NULL,
@@ -203,6 +214,19 @@ CREATE TABLE IF NOT EXISTS webhook_attempts (
   attempted_at  INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS webhook_attempts_webhook ON webhook_attempts(webhook_id, id);
+
+-- Contract upgrade history. Records when contracts are upgraded with new code.
+CREATE TABLE IF NOT EXISTS contract_upgrades (
+  contract_id TEXT    NOT NULL,
+  tx_hash     TEXT    NOT NULL,
+  ledger      INTEGER NOT NULL,
+  close_time  INTEGER NOT NULL,
+  new_hash    TEXT    NOT NULL,
+  old_hash    TEXT,
+  PRIMARY KEY (contract_id, ledger, tx_hash)
+);
+CREATE INDEX IF NOT EXISTS contract_upgrades_contract ON contract_upgrades(contract_id, ledger DESC);
+CREATE INDEX IF NOT EXISTS contract_upgrades_ledger ON contract_upgrades(ledger DESC);
 `;
 
 /**
@@ -233,6 +257,15 @@ const ADDED_INDEXES: ReadonlyArray<[table: string, name: string, columns: string
   // and buckets them by their close time, so the range filter is served from
   // the index rather than from a scan of the merchant's whole history.
   ["charges", "charges_merchant_created_at", "merchant, created_at"],
+  // Ranking plans by active mandates counts each plan's active mandates with
+  // one covering range lookup instead of a scan of every mandate.
+  ["mandates", "mandates_plan_status", "plan_id, status"],
+  // The protocol fee report finds the newest charge and reads only the
+  // charges inside its bucket window, straight from the index.
+  ["charges", "charges_created_at_fee", "created_at, fee"],
+  // A merchant's unpaid report walks its due mandates oldest-due first, so
+  // the range and the order both come from the index.
+  ["mandates", "mandates_merchant_status_next_charge", "merchant, status, next_charge"],
 ];
 
 export function migrate(db: DatabaseSync): void {
@@ -291,6 +324,15 @@ export interface StoredContractEvent {
   closeTime: number | null;
 }
 
+export interface ContractUpgrade {
+  contractId: string;
+  txHash: string;
+  ledger: number;
+  closeTime: number;
+  newHash: string;
+  oldHash?: string | undefined;
+}
+
 export function saveContractEvent(db: DatabaseSync, event: StoredContractEvent): void {
   db.prepare(`INSERT OR IGNORE INTO events
     (event_id, contract_id, ledger, tx_hash, event_index, topics, data, close_time)
@@ -300,10 +342,20 @@ export function saveContractEvent(db: DatabaseSync, event: StoredContractEvent):
   );
 }
 
+export function saveContractUpgrade(db: DatabaseSync, upgrade: ContractUpgrade): void {
+  db.prepare(`INSERT OR IGNORE INTO contract_upgrades
+    (contract_id, tx_hash, ledger, close_time, new_hash, old_hash)
+    VALUES (?, ?, ?, ?, ?, ?)`).run(
+    upgrade.contractId, upgrade.txHash, upgrade.ledger, upgrade.closeTime,
+    upgrade.newHash, upgrade.oldHash ?? null,
+  );
+}
+
 export function clearProjections(db: DatabaseSync): void {
   // Do not remove cursor, raw events, or operational webhook configuration.
   for (const table of [
-    "plans", "mandates", "charges", "vault_events", "fee_history", "mandate_events", "mandate_timeline",
+    "plans", "mandates", "charges", "vault_events", "fee_history", "mandate_events", "mandate_timeline", "contract_upgrades",
+    "merchant_profiles",
   ]) {
     db.exec(`DELETE FROM ${table}`);
   }

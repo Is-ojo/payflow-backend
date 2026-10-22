@@ -8,7 +8,7 @@ import { pinoHttp } from "pino-http";
 import type { DatabaseSync } from "node:sqlite";
 import type { Config, NetworkConfig } from "./config.ts";
 import type { IndexerStatus } from "./indexer.ts";
-import { buildAdminRoutes, type AdminHooks } from "./routes/admin.ts";
+import { buildAdminRoutes, type AdminHooks, type AdminToken } from "./routes/admin.ts";
 import { buildApiRouter, MerchantSummaryCache } from "./routes/index.ts";
 import { buildOpenApiDocument } from "./routes/openapi.ts";
 import { asReader, TokenMetadataService } from "./lib/tokens.ts";
@@ -20,6 +20,7 @@ import type { Sep10Auth } from "./routes/auth.ts";
 import { logger } from "./lib/logger.ts";
 import { metrics, publishIndexerMetrics } from "./lib/metrics.ts";
 import { withSpan } from "./lib/telemetry.ts";
+import { getVersionInfo } from "./lib/version.ts";
 
 /**
  * The shape of a failure that is safe to put in a log line.
@@ -341,10 +342,30 @@ export function createApp(
     });
   });
 
+  // Version and build information endpoint.
+  app.get("/version", (_req, res) => {
+    res.json({
+      ...getVersionInfo(),
+      network: config.STELLAR_NETWORK,
+      contracts: {
+        planRegistry: config.PLAN_REGISTRY_ID,
+        vault: config.VAULT_ID,
+        subscription: config.SUBSCRIPTION_ID,
+      },
+    });
+  });
+
   // Operator endpoints are opt-in. Without ADMIN_TOKEN — or without hooks —
   // /admin falls through to the 404 below like any unknown path.
-  if (config.ADMIN_TOKEN && admin) {
-    app.use("/admin", buildAdminRoutes(config.ADMIN_TOKEN, admin));
+  // ADMIN_TOKEN is a full-access token used exactly as written (a colon in it
+  // is just part of the secret); scoped and expiring tokens come from
+  // ADMIN_TOKENS.
+  const adminTokens: AdminToken[] = [
+    ...(config.ADMIN_TOKEN ? [{ token: config.ADMIN_TOKEN }] : []),
+    ...((config.ADMIN_TOKENS ?? []) as AdminToken[]),
+  ];
+  if (adminTokens.length > 0 && admin) {
+    app.use("/admin", buildAdminRoutes(adminTokens, admin));
   }
 
   if (config.KEEPER_ENABLED && admin?.keeperHistory) {
