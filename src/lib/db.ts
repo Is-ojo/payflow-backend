@@ -215,6 +215,29 @@ CREATE TABLE IF NOT EXISTS webhook_attempts (
 );
 CREATE INDEX IF NOT EXISTS webhook_attempts_webhook ON webhook_attempts(webhook_id, id);
 
+-- One row per keeper charge attempt (#144): when it ran, how it ended
+-- ('settled', 'failed', or 'skipped' when the vault could not cover the
+-- charge), the error code and the transaction hash. "failures" is the
+-- mandate's consecutive-failure streak after the attempt (0 once it settles)
+-- and "retry_at" when the keeper tries again, so a mandate's newest row is its
+-- whole backoff state and a restart resumes it. Operational, not a projection:
+-- a reindex keeps it, and the keeper prunes rows older than 90 days.
+CREATE TABLE IF NOT EXISTS charge_attempts (
+  id           INTEGER PRIMARY KEY,
+  mandate_id   INTEGER NOT NULL,
+  attempted_at INTEGER NOT NULL,   -- unix seconds
+  result       TEXT    NOT NULL,   -- 'settled' | 'failed' | 'skipped'
+  error_code   TEXT,
+  tx_hash      TEXT,
+  -- What the vault was missing, for a 'skipped' attempt: a decimal string in
+  -- the token's smallest unit.
+  shortfall    TEXT,
+  failures     INTEGER NOT NULL,
+  retry_at     INTEGER
+);
+CREATE INDEX IF NOT EXISTS charge_attempts_mandate ON charge_attempts(mandate_id, id);
+CREATE INDEX IF NOT EXISTS charge_attempts_attempted_at ON charge_attempts(attempted_at);
+
 -- Contract upgrade history. Records when contracts are upgraded with new code.
 CREATE TABLE IF NOT EXISTS contract_upgrades (
   contract_id TEXT    NOT NULL,
@@ -257,6 +280,12 @@ const ADDED_INDEXES: ReadonlyArray<[table: string, name: string, columns: string
   // and buckets them by their close time, so the range filter is served from
   // the index rather than from a scan of the merchant's whole history.
   ["charges", "charges_merchant_created_at", "merchant, created_at"],
+  // A mandate's charge history can be filtered by close time, so the range
+  // is served from the index rather than from the mandate's whole history.
+  ["charges", "charges_mandate_created_at", "mandate_id, created_at"],
+  // The subscriber CSV streams one subscriber's charges in close-time order,
+  // the same keyset pattern as the merchant export.
+  ["charges", "charges_subscriber_created_at", "subscriber, created_at"],
   // Ranking plans by active mandates counts each plan's active mandates with
   // one covering range lookup instead of a scan of every mandate.
   ["mandates", "mandates_plan_status", "plan_id, status"],

@@ -337,6 +337,24 @@ describe("direct database queries", () => {
     assert.deepEqual(listMandateCharges(db, 999, 50), []);
   });
 
+  test("listMandateCharges bounds created_at inclusively, in seconds", () => {
+    // The two charges were stamped at 5_000 and 9_000 milliseconds: seconds 5
+    // and 9. Both bounds include their own second.
+    assert.deepEqual(
+      listMandateCharges(db, 1, 50, 5, 9).map((c) => c.tx_hash),
+      ["tx-charge-1b", "tx-charge-1a"],
+    );
+    assert.deepEqual(
+      listMandateCharges(db, 1, 50, 5, 5).map((c) => c.tx_hash),
+      ["tx-charge-1a"],
+    );
+    assert.deepEqual(
+      listMandateCharges(db, 1, 50, 6).map((c) => c.tx_hash),
+      ["tx-charge-1b"],
+    );
+    assert.deepEqual(listMandateCharges(db, 1, 50, undefined, 4), []);
+  });
+
   test("listDueMandates includes only active unexhausted mandates with next_charge <= now", () => {
     // Mandate 1 is active and due (now - 60); Mandate 2 is future; Mandate 3 is cancelled;
     // Mandate 4 has charges_made (1) == max_charges (1) so it is excluded.

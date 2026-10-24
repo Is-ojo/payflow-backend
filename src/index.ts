@@ -91,8 +91,12 @@ process.on("exit", () => {
   for (const rt of runtimes) rt.releaseLock();
 });
 
+// A mandate's failing and recovered streaks reach the merchant's webhooks on
+// the same network the keeper settles.
 const keeper = config.KEEPER_ENABLED
-  ? new Keeper(defaultRuntime.db, defaultRuntime.server, config)
+  ? new Keeper(defaultRuntime.db, defaultRuntime.server, config, (event) =>
+      defaultRuntime.dispatcher.onChargeStreak(event),
+    )
   : undefined;
 const activeKeeper = keeper;
 if (keeper) {

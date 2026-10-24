@@ -125,7 +125,8 @@ export function plansRouter(db: DatabaseSync, tokens: TokenMetadataService): Rou
   });
 
   /** `GET /plans/:id/stats`: active and total mandates, cancellations, gross
-   * collected, and average charges per mandate. */
+   * collected, average charges per mandate, and the average and median
+   * lifetime value per subscriber net of fee. */
   r.get("/plans/:id/stats", (req, res) => {
     const id = validate(req, res, "id", idSchema, req.params.id);
     if (!id.ok) return;
@@ -146,6 +147,8 @@ export function plansRouter(db: DatabaseSync, tokens: TokenMetadataService): Rou
       // A plan with no mandates has no average; report 0 rather than NaN.
       averageChargesPerMandate:
         stats.totalMandates === 0 ? 0 : stats.totalCharges / stats.totalMandates,
+      averageLtv: String(stats.averageLtv),
+      medianLtv: String(stats.medianLtv),
     };
     res.json(body);
   });

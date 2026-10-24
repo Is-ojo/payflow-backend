@@ -16,6 +16,7 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
+    "build:client": "tsc -p client/tsconfig.json",
     "start": "node dist/index.js",
     "dev": "node --watch --experimental-strip-types src/index.ts",
     "api": "node --experimental-strip-types src/index.ts",
@@ -24,12 +25,14 @@
     "load-test": "node --experimental-strip-types test/load-test.ts",
     "mutation-test": "node --experimental-strip-types --test test/mutation.ts",
     "cli": "node --experimental-strip-types src/cmd/cli.ts",
+    "seed": "node --experimental-strip-types src/cmd/seed.ts",
     "test": "node --experimental-strip-types --test test/*.test.ts",
     "test:coverage": "node --experimental-strip-types --experimental-test-coverage --test-coverage-include=src/** --test-coverage-lines=94 --test-reporter=tap --test-reporter=lcov --test-reporter-destination=stdout --test-reporter-destination=lcov.info --test test/*.test.ts",
     "typecheck": "npm run typecheck:src && npm run typecheck:test",
     "typecheck:src": "tsc --noEmit -p tsconfig.json",
     "typecheck:test": "tsc --noEmit -p tsconfig.test.json",
     "lint": "eslint src test",
+    "schema": "node --experimental-strip-types src/cmd/schema.ts",
     "rebuild:projections": "node --experimental-strip-types src/cmd/rebuild-projections.ts",
     "reindex": "node --experimental-strip-types src/cmd/reindex.ts"
   },
@@ -41,6 +44,7 @@
     "helmet": "^8.3.0",
     "pino": "^9.5.0",
     "pino-http": "^11.0.0",
+    "redoc": "^3.0.1",
     "zod": "^4.6.7"
   },
   "devDependencies": {

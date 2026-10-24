@@ -16,7 +16,7 @@ import {
   type DecodedEvent,
 } from "./lib/stellar.ts";
 import { logger } from "./lib/logger.ts";
-import { metrics, publishIndexerMetrics } from "./lib/metrics.ts";
+import { metrics, publishBusinessMetrics, publishIndexerMetrics } from "./lib/metrics.ts";
 import { defaultMerchantSummaryCache, type MerchantSummaryCache } from "./routes/index.ts";
 
 export { parseCloseTime };
@@ -187,6 +187,12 @@ export class Indexer {
   private publishMetrics(applied: number): void {
     const network = this.networkLabel;
     publishIndexerMetrics(this.status, network);
+    // The business gauges come from the projection this pass just wrote (or
+    // left untouched), so they are re-read here: after each pass the series
+    // describe the current mandate base, merchant base and MRR. The read is
+    // one indexed statement and logs-and-continues on failure, so it cannot
+    // crash the loop.
+    publishBusinessMetrics(this.db, network);
     if (applied > 0) metrics.increment("events_applied", applied, { network });
   }
 
