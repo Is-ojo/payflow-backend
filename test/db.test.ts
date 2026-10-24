@@ -139,6 +139,9 @@ describe("database backup", () => {
     } finally {
       // no-op: cleaned in try
     }
+  });
+});
+
 describe("report query indexes", () => {
   test("ranking plans by active mandates counts each plan from a covering index", () => {
     const db = openDatabase(":memory:");
